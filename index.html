@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<!--
+  Strip Studio — a Web Bluetooth effects controller for cheap BLE LED strips.
+
+  The BLE protocol code below is ported from the-sz/BluetoothLedStrip
+  (https://github.com/the-sz/BluetoothLedStrip), which is GPL-3.0, so this file is
+  GPL-3.0 as well. Protocol credits (from that repo): 8none1/zengge_lednetwf (LEDnetWF)
+  and themooer1/cheshire (Keepsmile).
+
+  Needs Chrome/Edge (desktop or Android) on https:// or localhost. Safari/iOS has no Web Bluetooth.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strip Studio</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141821; --panel2:#1b2030; --line:#262c3d;
+    --text:#e8ebf2; --dim:#8a93a8; --accent:#ffb347; --ok:#4cd98a; --bad:#ff5d6c;
+    --glow: 255,180,71;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  main{max-width:860px;margin:0 auto;padding:18px 16px 60px}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  h1{font-size:20px;margin:0;letter-spacing:.3px}
+  h1 span{color:var(--accent)}
+  .status{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:13px;margin-left:auto}
+  .dot{width:9px;height:9px;border-radius:50%;background:#555}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.err{background:var(--bad)}
+
+  /* live preview: one bar standing in for the whole strip */
+  .stage{position:relative;height:110px;border-radius:16px;background:#07080b;
+    border:1px solid var(--line);overflow:hidden;margin-bottom:14px}
+  .halo{position:absolute;inset:-40%;background:radial-gradient(closest-side,
+    rgba(var(--glow),.55),rgba(var(--glow),0));transition:background .05s linear}
+  .pixels{position:absolute;left:14px;right:14px;top:50%;transform:translateY(-50%);
+    display:flex;justify-content:space-between}
+  .px{width:10px;height:10px;border-radius:50%;background:rgb(var(--glow));
+    box-shadow:0 0 10px 3px rgba(var(--glow),.8)}
+  .readout{position:absolute;right:12px;bottom:8px;font:12px ui-monospace,monospace;color:#ffffffaa}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin:0 0 10px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);
+    border-radius:10px;padding:9px 14px;cursor:pointer}
+  button:hover{border-color:#3a4258}
+  button.primary{background:var(--accent);color:#1a1205;border-color:var(--accent);font-weight:600}
+  button.on{outline:2px solid var(--accent);outline-offset:-2px}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  label.chk{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:13px}
+
+  .fx{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px}
+  .fx button{text-align:left;padding:10px 12px}
+  .fx button small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+
+  .sliders{display:grid;grid-template-columns:110px 1fr 46px;gap:8px 10px;align-items:center;margin-top:12px}
+  .sliders label{color:var(--dim);font-size:13px}
+  .sliders output{font:12px ui-monospace,monospace;color:var(--dim);text-align:right}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  input[type=color]{width:44px;height:36px;border:none;background:none;padding:0;cursor:pointer}
+
+  .modes{display:grid;grid-template-columns:repeat(auto-fill,minmax(46px,1fr));gap:6px;max-height:220px;overflow:auto;padding-right:4px}
+  .modes button{padding:7px 0;font:12px ui-monospace,monospace}
+  .note{color:var(--dim);font-size:13px;margin:8px 0 0}
+  .warn{background:#2a1a10;border-color:#5a3517;color:#ffcf9e}
+  .hidden{display:none!important}
+  code{font:12px ui-monospace,monospace;background:#0003;padding:1px 5px;border-radius:5px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Strip <span>Studio</span></h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
+  </header>
+
+  <div class="card warn hidden" id="noBt">
+    This browser has no Web Bluetooth. Use Chrome or Edge on Android, Windows, macOS or Linux,
+    opened from <code>https://</code> or <code>localhost</code>. On iPhone, the Bluefy browser supports it.
+  </div>
+
+  <div class="stage" aria-hidden="true">
+    <div class="halo" id="halo"></div>
+    <div class="pixels" id="pixels"></div>
+    <div class="readout" id="readout">#000000</div>
+  </div>
+
+  <section class="card">
+    <h2>Connection</h2>
+    <div class="row">
+      <button class="primary" id="btnConnect">Connect strip</button>
+      <button id="btnDisconnect" disabled>Disconnect</button>
+      <button id="btnOn" disabled>On</button>
+      <button id="btnOff" disabled>Off</button>
+      <label class="chk"><input type="checkbox" id="showAll"> Show all Bluetooth devices</label>
+    </div>
+    <p class="note" id="devInfo">Supports MagicStrip, LEDnetWF (Zengge) and KS03 (Keepsmile) strips.</p>
+  </section>
+
+  <section class="card">
+    <h2>Live effects (streamed from this page)</h2>
+    <div class="fx" id="fxGrid"></div>
+    <div class="row" style="margin-top:12px">
+      <input type="color" id="color" value="#ff2a1a" title="Base color">
+      <input type="color" id="color2" value="#18ff5a" title="Second color">
+      <span class="note" style="margin:0">Base / second color (used by Solid, Breathe, Strobe, Fade 2)</span>
+    </div>
+    <div class="sliders">
+      <label for="speed">Speed</label><input type="range" id="speed" min="1" max="100" value="45"><output id="speedOut">45</output>
+      <label for="level">Intensity</label><input type="range" id="level" min="0" max="100" value="100"><output id="levelOut">100</output>
+      <label for="fps">Updates/sec</label><input type="range" id="fps" min="4" max="40" value="20"><output id="fpsOut">20</output>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="btnStop">Stop effect</button>
+      <label class="chk"><input type="checkbox" id="gamma" checked> Gamma correction</label>
+    </div>
+    <p class="note">These set the whole strip to one color many times a second. If the strip lags or stutters, lower Updates/sec.</p>
+  </section>
+
+  <section class="card">
+    <h2>Built-in animations (run on the strip)</h2>
+    <p class="note" style="margin-top:0">These are the strip's own per-pixel animations (chases, comets, gradients). The numbers mean different things on each controller, so tap through them.</p>
+    <div class="modes" id="modeGrid"></div>
+    <div class="sliders">
+      <label for="mSpeed">Speed</label><input type="range" id="mSpeed" min="0" max="100" value="50"><output id="mSpeedOut">50</output>
+      <label for="mBright">Brightness</label><input type="range" id="mBright" min="0" max="100" value="100"><output id="mBrightOut">100</output>
+    </div>
+  </section>
+
+  <p class="note">Protocol code ported from <a style="color:var(--accent)" href="https://github.com/the-sz/BluetoothLedStrip">the-sz/BluetoothLedStrip</a> (GPL-3.0).</p>
+</main>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ */
+/*  BLE protocol layer (ported from the-sz/BluetoothLedStrip, GPL-3.0) */
+/* ------------------------------------------------------------------ */
+const SVC = {
+  magic:    { svc: '0000fff0-0000-1000-8000-00805f9b34fb', chr: '0000fff1-0000-1000-8000-00805f9b34fb' },
+  lednetwf: { svc: '0000ffff-0000-1000-8000-00805f9b34fb', chr: '0000ff01-0000-1000-8000-00805f9b34fb' },
+  keepsmile:{ svc: '0000afd0-0000-1000-8000-00805f9b34fb', chr: '0000afd1-0000-1000-8000-00805f9b34fb' },
+};
+const TYPE_LABEL = { magic: 'MagicStrip', lednetwf: 'LEDnetWF / Zengge', keepsmile: 'Keepsmile KS03' };
+// Mode ranges from the library README; Keepsmile's range isn't documented, so we offer a guess.
+const MODE_RANGE = { magic: [0, 40], lednetwf: [1, 113], keepsmile: [0, 40] };
+
+class Strip {
+  constructor(){ this.type = null; this.chr = null; this.dev = null; this.counter = 0;
+    this.mode = 1; this.speed = 50; this.bright = 100;
+    this.busy = false; this.pending = null; }
+
+  async connect(showAll, onDisconnect){
+    const optionalServices = [SVC.magic.svc, SVC.lednetwf.svc, SVC.keepsmile.svc];
+    const opts = showAll
+      ? { acceptAllDevices: true, optionalServices }
+      : { filters: [{ services: [SVC.magic.svc] }, { namePrefix: 'LEDnetWF' }, { namePrefix: 'KS03' }], optionalServices };
+    this.dev = await navigator.bluetooth.requestDevice(opts);
+    this.dev.addEventListener('gattserverdisconnected', onDisconnect);
+    const server = await this.dev.gatt.connect();
+    for (const t of ['magic', 'lednetwf', 'keepsmile']) {
+      try {
+        const s = await server.getPrimaryService(SVC[t].svc);
+        this.chr = await s.getCharacteristic(SVC[t].chr);
+        this.type = t;
+        return this.dev;
+      } catch (_) { /* try next */ }
+    }
+    this.dev.gatt.disconnect();
+    throw new Error('Connected, but this device has none of the supported LED services.');
+  }
+
+  disconnect(){ if (this.dev && this.dev.gatt.connected) this.dev.gatt.disconnect(); }
+
+  /* Latest-wins send queue: BLE is slow, so stale frames are dropped instead of piling up. */
+  send(bytes){
+    if (!this.chr) return;
+    if (this.busy) { this.pending = bytes; return; }
+    this.busy = true;
+    const write = this.chr.writeValueWithoutResponse
+      ? this.chr.writeValueWithoutResponse(bytes) : this.chr.writeValue(bytes);
+    write.catch(e => console.warn('BLE write failed', e)).finally(() => {
+      this.busy = false;
+      if (this.pending) { const p = this.pending; this.pending = null; this.send(p); }
+    });
+  }
+
+  lednetwfPacket(magic, data){
+    this.counter = (this.counter + 1) & 0xffff;
+    const len = magic.length + data.length;
+    return new Uint8Array([(this.counter >> 8) & 0xff, this.counter & 0xff, 0x80, 0x00, 0x00,
+      len, len + 1, ...magic, ...data, 0]);
+  }
+
+  static rgb2hsv(r, g, b){ // hue/2 in a byte, sat & value as 0-100 (as in the original library)
+    r /= 255; g /= 255; b /= 255;
+    const v = Math.max(r, g, b), c = v - Math.min(r, g, b);
+    const h = c && (v === g ? (r - b) / c : v === r ? 2 + (b - g) / c : 4 + (g - r) / c);
+    return [Math.round(60 * (h < 0 ? h + 6 : h) / 2), Math.round((v && c / v) * 100), Math.round(v * 100)];
+  }
+
+  setRGB(r, g, b){
+    if (this.type === 'magic') this.send(new Uint8Array([0x03, r, g, b]));
+    else if (this.type === 'lednetwf') this.send(this.lednetwfPacket([0x0B, 0x3B], [0xA1, ...Strip.rgb2hsv(r, g, b), 0,0,0,0,0,0,0]));
+    else if (this.type === 'keepsmile') this.send(new Uint8Array([0x5A, 0x00, 0x01, r, g, b, 0x00, this.bright, 0x00, 0xA5]));
+  }
+
+  setPower(on){
+    if (this.type === 'magic') this.send(new Uint8Array([0x04, on ? 1 : 0]));
+    else if (this.type === 'lednetwf') this.send(this.lednetwfPacket([0x0B, 0x3B], [on ? 0x23 : 0x24, 0,0,0,0,0,0,0,0,0,0]));
+    else if (this.type === 'keepsmile') this.send(new Uint8Array([0x5B, on ? 0xF0 : 0x0F, 0x00, 0xB5]));
+  }
+
+  sendModeBlock(){ // LEDnetWF & Keepsmile carry mode+speed+brightness together
+    if (this.type === 'lednetwf') this.send(this.lednetwfPacket([0x0B, 0x38], [this.mode, this.speed, this.bright]));
+    else if (this.type === 'keepsmile') this.send(new Uint8Array([0x5C, 0x00, this.mode + 128, this.speed, this.bright, 0x00, 0xC5]));
+  }
+  setMode(m){ this.mode = m; if (this.type === 'magic') this.send(new Uint8Array([0x07, m])); else this.sendModeBlock(); }
+  setSpeed(pct){ // pct: 0 slow .. 100 fast
+    this.speed = pct;
+    if (this.type === 'magic') this.send(new Uint8Array([0x09, Math.round(255 - pct * 2.55)])); // MagicStrip: 0 = fastest
+    else this.sendModeBlock();
+  }
+  setBrightness(pct){
+    this.bright = pct;
+    if (this.type === 'magic') this.send(new Uint8Array([0x08, Math.round(pct * 2.55)]));
+    else this.sendModeBlock();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Effects: each returns [r,g,b] in 0..1 for time t (seconds)         */
+/* ------------------------------------------------------------------ */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const mix = (a, b, k) => a.map((v, i) => v + (b[i] - v) * k);
+const hsv = (h, s, v) => { // h in turns
+  h = ((h % 1) + 1) % 1; const i = Math.floor(h * 6), f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), u = v * (1 - (1 - f) * s);
+  return [[v,u,p],[q,v,p],[p,v,u],[p,q,v],[u,p,v],[v,p,q]][i % 6];
+};
+const hex2rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+const ease = k => k * k * (3 - 2 * k);
+
+// small deterministic noise for organic flicker
+function noise1(x){ const i = Math.floor(x), f = x - i;
+  const r = n => { const s = Math.sin(n * 127.1) * 43758.5453; return s - Math.floor(s); };
+  return r(i) + (r(i + 1) - r(i)) * ease(f); }
+
+let lightning = { next: 0, flashes: [] };
+
+const EFFECTS = {
+  solid:     { name: 'Solid',      hint: 'base color',      fn: (t, s, c) => c.a },
+  rainbow:   { name: 'Rainbow',    hint: 'hue sweep',       fn: (t, s) => hsv(t * s * 0.25, 1, 1) },
+  breathe:   { name: 'Breathe',    hint: 'slow pulse',      fn: (t, s, c) => c.a.map(v => v * (0.06 + 0.94 * ease((Math.sin(t * s * 2.2) + 1) / 2))) },
+  fade2:     { name: 'Fade 2',     hint: 'base ↔ second',   fn: (t, s, c) => mix(c.a, c.b, ease((Math.sin(t * s * 1.6) + 1) / 2)) },
+  xmas:      { name: 'Christmas',  hint: 'red · green · white', fn: (t, s) => {
+      const pal = [[1, .02, 0], [0, 1, .08], [1, .82, .55]], k = t * s * 0.35, i = Math.floor(k);
+      return mix(pal[i % 3], pal[(i + 1) % 3], ease(clamp((k - i) * 2.2 - 1.2)));
+    } },
+  candle:    { name: 'Candle',     hint: 'warm flicker',    fn: (t, s) => {
+      const f = 0.55 + 0.3 * noise1(t * (4 + s * 6)) + 0.15 * noise1(t * (17 + s * 10) + 9);
+      return [1 * f, 0.42 * f * f, 0.06 * f * f * f];
+    } },
+  fire:      { name: 'Fire',       hint: 'roaring embers',  fn: (t, s) => {
+      const f = clamp(0.35 + 0.65 * noise1(t * (6 + s * 10)) * (0.7 + 0.3 * noise1(t * 31)));
+      return [f, 0.25 * f * f + 0.05 * f, 0];
+    } },
+  ocean:     { name: 'Ocean',      hint: 'drifting blues',  fn: (t, s) => {
+      const w = noise1(t * s * 0.8), w2 = noise1(t * s * 0.5 + 40);
+      return hsv(0.48 + 0.12 * w, 0.85, 0.35 + 0.65 * w2);
+    } },
+  aurora:    { name: 'Aurora',     hint: 'green → violet',  fn: (t, s) => {
+      const w = noise1(t * s * 0.6); return hsv(0.33 + 0.45 * w, 0.9, 0.4 + 0.6 * noise1(t * s * 0.9 + 7));
+    } },
+  strobe:    { name: 'Strobe',     hint: 'base color',      fn: (t, s, c) => ((t * (2 + s * 14)) % 1 < 0.35 ? c.a : [0, 0, 0]) },
+  police:    { name: 'Police',     hint: 'red / blue',      fn: (t, s) => {
+      const k = (t * (0.6 + s * 2.4)) % 2, inner = (k % 1) * 3;
+      const lit = inner < 1 ? (inner % 0.5 < 0.25) : false;
+      return lit ? (k < 1 ? [1, 0, 0] : [0, 0.15, 1]) : [0, 0, 0];
+    } },
+  lightning: { name: 'Lightning',  hint: 'storm flashes',   fn: (t, s) => {
+      if (t > lightning.next) {
+        const n = 1 + Math.floor(Math.random() * 3); lightning.flashes = [];
+        let at = t; for (let i = 0; i < n; i++) { at += 0.05 + Math.random() * 0.12; lightning.flashes.push(at); }
+        lightning.next = at + (6 - s * 4.5) * (0.4 + Math.random());
+      }
+      let v = 0; for (const f of lightning.flashes) { const d = t - f; if (d >= 0 && d < 0.25) v = Math.max(v, Math.exp(-d * 18)); }
+      return [0.02 + 0.9 * v, 0.02 + 0.9 * v, 0.06 + v];
+    } },
+  music:     { name: 'Music',      hint: 'microphone beat', fn: null /* set up below */ },
+};
+
+/* --------------------------- music mode ---------------------------- */
+const audio = { ctx: null, an: null, buf: null, avg: 0.02, env: 0, hue: 0 };
+async function startMic(){
+  if (audio.an) return true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    audio.an = audio.ctx.createAnalyser(); audio.an.fftSize = 1024; audio.an.smoothingTimeConstant = 0.5;
+    audio.ctx.createMediaStreamSource(stream).connect(audio.an);
+    audio.buf = new Uint8Array(audio.an.frequencyBinCount);
+    return true;
+  } catch (e) { setStatus('Microphone blocked: ' + e.message, 'err'); return false; }
+}
+EFFECTS.music.fn = (t, s, c, dt) => {
+  if (!audio.an) return [0, 0, 0];
+  audio.an.getByteFrequencyData(audio.buf);
+  // bass ≈ first ~8 bins (≈ 0-350 Hz at 44.1/48 kHz with fftSize 1024)
+  let bass = 0; for (let i = 1; i < 9; i++) bass += audio.buf[i]; bass /= 8 * 255;
+  audio.avg += (bass - audio.avg) * Math.min(1, dt * 0.8);           // slow running average
+  const kick = clamp((bass - audio.avg * 1.15) * 6);                 // how far above average
+  audio.env = Math.max(kick, audio.env - dt * (1.5 + s * 4));        // fast attack, tunable decay
+  audio.hue += dt * (0.02 + s * 0.08) + kick * 0.08;                 // drift + jump on beats
+  return hsv(audio.hue, 1, 0.08 + 0.92 * audio.env);
+};
+
+/* ------------------------------------------------------------------ */
+/*  UI + render loop                                                   */
+/* ------------------------------------------------------------------ */
+const $ = id => document.getElementById(id);
+const strip = new Strip();
+let current = null, lastSent = 0, lastFrame = performance.now(), t0 = performance.now();
+
+function setStatus(text, kind){ $('statusText').textContent = text; $('dot').className = 'dot' + (kind ? ' ' + kind : ''); }
+
+// preview pixels
+for (let i = 0; i < 24; i++) { const d = document.createElement('div'); d.className = 'px'; $('pixels').appendChild(d); }
+function preview(r, g, b){
+  const hex = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+  document.documentElement.style.setProperty('--glow', `${r},${g},${b}`);
+  $('readout').textContent = hex;
+}
+
+// effect buttons
+for (const [key, fx] of Object.entries(EFFECTS)) {
+  const b = document.createElement('button');
+  b.innerHTML = `${fx.name}<small>${fx.hint}</small>`;
+  b.dataset.fx = key;
+  b.onclick = async () => {
+    if (key === 'music' && !(await startMic())) return;
+    if (audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume();
+    current = key; t0 = performance.now(); lightning.next = 0;
+    document.querySelectorAll('#fxGrid button').forEach(x => x.classList.toggle('on', x === b));
+  };
+  $('fxGrid').appendChild(b);
+}
+$('btnStop').onclick = () => { current = null; document.querySelectorAll('#fxGrid button').forEach(x => x.classList.remove('on')); };
+
+// slider readouts
+for (const id of ['speed', 'level', 'fps', 'mSpeed', 'mBright']) {
+  const el = $(id), out = $(id + 'Out'); el.addEventListener('input', () => out.textContent = el.value);
+}
+
+function frame(now){
+  const dt = Math.min(0.1, (now - lastFrame) / 1000); lastFrame = now;
+  if (current) {
+    const t = (now - t0) / 1000, s = $('speed').value / 50;   // s ≈ 0.02..2
+    const cols = { a: hex2rgb($('color').value), b: hex2rgb($('color2').value) };
+    let rgb = EFFECTS[current].fn(t, s, cols, dt).map(v => clamp(v) * $('level').value / 100);
+    if ($('gamma').checked) rgb = rgb.map(v => Math.pow(v, 2.2));
+    const out = rgb.map(v => Math.round(v * 255));
+    preview(...out.map(v => Math.round(255 * Math.pow(v / 255, $('gamma').checked ? 1 / 2.2 : 1)))); // show perceived color
+    if (strip.chr && now - lastSent >= 1000 / $('fps').value) { lastSent = now; strip.setRGB(...out); }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// built-in modes
+function buildModes(){
+  const [lo, hi] = MODE_RANGE[strip.type || 'lednetwf'];
+  $('modeGrid').innerHTML = '';
+  for (let m = lo; m <= hi; m++) {
+    const b = document.createElement('button'); b.textContent = m;
+    b.onclick = () => {
+      if (!strip.chr) return setStatus('Connect a strip first', 'err');
+      $('btnStop').click();
+      strip.speed = +$('mSpeed').value; strip.bright = +$('mBright').value;
+      strip.setMode(m);
+      document.querySelectorAll('#modeGrid button').forEach(x => x.classList.toggle('on', x === b));
+      preview(40, 40, 40); $('readout').textContent = 'mode ' + m;
+    };
+    $('modeGrid').appendChild(b);
+  }
+}
+buildModes();
+$('mSpeed').addEventListener('change', () => strip.chr && strip.setSpeed(+$('mSpeed').value));
+$('mBright').addEventListener('change', () => strip.chr && strip.setBrightness(+$('mBright').value));
+
+// connection
+function setConnected(on){
+  $('btnConnect').disabled = on; $('btnDisconnect').disabled = !on;
+  $('btnOn').disabled = !on; $('btnOff').disabled = !on;
+}
+$('btnConnect').onclick = async () => {
+  try {
+    setStatus('Choose your strip…');
+    const dev = await strip.connect($('showAll').checked, () => {
+      setConnected(false); strip.chr = null; setStatus('Disconnected');
+    });
+    setConnected(true);
+    setStatus(`Connected: ${dev.name || 'unnamed'}`, 'on');
+    $('devInfo').textContent = `Protocol: ${TYPE_LABEL[strip.type]}. Pick an effect or a built-in animation.`;
+    buildModes();
+  } catch (e) {
+    if (e.name === 'NotFoundError') setStatus('No device chosen. Try “Show all Bluetooth devices”.');
+    else setStatus(e.message || String(e), 'err');
+  }
+};
+$('btnDisconnect').onclick = () => strip.disconnect();
+$('btnOn').onclick = () => strip.setPower(true);
+$('btnOff').onclick = () => { $('btnStop').click(); strip.setPower(false); preview(0, 0, 0); };
+
+if (!navigator.bluetooth) { $('noBt').classList.remove('hidden'); $('btnConnect').disabled = true; }
+preview(0, 0, 0);
+</script>
+</body>
+</html>
